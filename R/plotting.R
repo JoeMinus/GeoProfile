@@ -88,7 +88,10 @@ theme_nothing <- function(font_size = 14, font_family = ""){
 #'
 #' @param params a list of parameters as defined by [geoParams()].
 #' @param mcmc stored output obtained by running [geoMCMC()]. Leave as `NULL` to plot prior only.
-#' @param plotMax maximum x-axis range to plot. Leave as `NULL` to use default settings.
+#' @param xlim numeric vector of length 2 giving the x-axis range (must be
+#'   non-negative). Leave as `NULL` to use default settings.
+#' @param ylim numeric vector of length 2 giving the y-axis range. Leave as
+#'   `NULL` to use default settings.
 #'
 #' @returns Nothing (called for plotting)
 #'
@@ -109,18 +112,24 @@ theme_nothing <- function(font_size = 14, font_family = ""){
 #' d <- geoData(sim$longitude, sim$latitude)
 #' p <- geoParams(data = d, sigma_mean = 1.0, sigma_squared_shape = 2)
 #' m <- geoMCMC(data = d, params = p)
-#' geoPlotSigma(params = p, mcmc = m)
+#' geoPlotSigma(params = p, mcmc = m, xlim = c(0,3), ylim = c(0,6))
 
-geoPlotSigma <- function(params, mcmc=NULL, plotMax=NULL) {
+geoPlotSigma <- function(params, mcmc = NULL, xlim = NULL, ylim = NULL) {
 
   # check params
-  geoParamsCheck(params, silent=TRUE)
+  geoParamsCheck(params, silent = TRUE)
 
-  # check that plotMax is sensible
-  if (!is.null(plotMax)) {
-    cli_stopifnot(is.numeric(plotMax), "plotMax is not numeric!")
-    cli_stopifnot(is.finite(plotMax), "plotMax is not finite!")
-    cli_stopifnot(plotMax>0, "plotMax is not a positive integer!")
+  # check that xlim and ylim are sensible
+  if (!is.null(xlim)) {
+    cli_stopifnot(is.numeric(xlim) && length(xlim) == 2, "xlim must be a numeric vector of length 2")
+    cli_stopifnot(all(is.finite(xlim)), "xlim must be finite")
+    cli_stopifnot(xlim[1] >= 0, "xlim[1] must be >= 0 (sigma is positive)")
+    cli_stopifnot(xlim[2] > xlim[1], "xlim[2] must be greater than xlim[1]")
+  }
+  if (!is.null(ylim)) {
+    cli_stopifnot(is.numeric(ylim) && length(ylim) == 2, "ylim must be a numeric vector of length 2")
+    cli_stopifnot(all(is.finite(ylim)), "ylim must be finite")
+    cli_stopifnot(ylim[2] > ylim[1], "ylim[2] must be greater than ylim[1]")
   }
 
   # extract sigma parameters
@@ -130,39 +139,48 @@ geoPlotSigma <- function(params, mcmc=NULL, plotMax=NULL) {
   beta <- params$model$sigma_squared_rate
 
   # stop if using fixed sigma model
-  if (sigma_var==0) {
+  if (sigma_var == 0) {
     cli::cli_abort(c("x" = 'Can only produce this plot under variable-sigma model (i.e. sigma_var > 0)'))
-    }
-
-  # extract sigma draws from mcmc object
-  sigma_draws <- mcmc$sigma
-
-  # default plotMax based on extent of prior distribution AND the extent of posterior draws if available
-  if (is.null(plotMax)) {
-    plotMax <- sigma_mean + 3*sqrt(sigma_var)
-    if (!is.null(sigma_draws)) {
-      plotMax <- max(plotMax, 2*max(sigma_draws, na.rm=TRUE))
-    }
   }
 
-  # produce prior distribution
-  sigma_vec <- seq(0, plotMax, l=501)
+  # extract sigma draws from mcmc object
+  sigma_draws <- if (!is.null(mcmc)) mcmc$sigma else NULL
+
+  # default xlim based on extent of prior distribution AND the extent of posterior draws if available
+  if (is.null(xlim)) {
+    x_max <- sigma_mean + 3 * sqrt(sigma_var)
+    if (!is.null(sigma_draws)) {
+      x_max <- max(x_max, 2 * max(sigma_draws, na.rm = TRUE))
+    }
+    xlim <- c(0, x_max)
+  }
+
+  # prior distribution over the x range
+  sigma_vec <- seq(xlim[1], xlim[2], l = 501)
   sigma_prior <- dRIG(sigma_vec, alpha, beta)
 
+  # posterior density (if draws available)
+  sigma_posterior <- NULL
+  if (!is.null(sigma_draws)) {
+    sigma_posterior <- stats::density(sigma_draws, from = xlim[1], to = xlim[2])
+  }
+
+  # default ylim: 10% headroom above the taller of prior and posterior (finite values only)
+  if (is.null(ylim)) {
+    v <- c(sigma_prior, sigma_posterior$y)
+    v <- v[is.finite(v)]
+    ylim <- c(0, 1.1 * max(v))
+  }
+
   # plot prior and overlay density of posterior draws if used
-  if (is.null(sigma_draws)) {
+  plot(sigma_vec, sigma_prior, type = 'l', lty = 1, xlim = xlim, ylim = ylim,
+       xlab = 'sigma (km)', ylab = 'probability density', main = '')
 
-    plot(sigma_vec, sigma_prior, type='l', lty=1, xlab='sigma (km)', ylab='probability density', main='')
-    graphics::legend(x='topright', legend='prior', lty=1)
-
+  if (is.null(sigma_posterior)) {
+    graphics::legend(x = 'topright', legend = 'prior', lty = 1)
   } else {
-
-    sigma_posterior <- stats::density(sigma_draws, from=0, to=plotMax)
-    y_max <- 1.1 * max(sigma_posterior$y, sigma_prior, na.rm=TRUE) # JM added some headroom and ensured plotting relative to both posterior and prior curves
-
-    plot(sigma_vec, sigma_prior, type='l', lty=1, ylim=c(0,y_max), xlab='sigma (km)', ylab='probability density', main='')
-    graphics::lines(sigma_posterior, lty=2)
-    graphics::legend(x='topright', legend=c('prior','posterior'), lty=c(1,2))
+    graphics::lines(sigma_posterior, lty = 2)
+    graphics::legend(x = 'topright', legend = c('prior', 'posterior'), lty = c(1, 2))
   }
 
 }
@@ -170,16 +188,21 @@ geoPlotSigma <- function(params, mcmc=NULL, plotMax=NULL) {
 #------------------------------------------------
 #' Plot prior and posterior distributions of alpha
 #'
-#' Plot prior distribution of alpha as defined by current parameter values. Can optionally overlay a kernel density plot of posterior draws of alpha
+#' Plot the Gamma prior on alpha as defined by current parameter values.
+#' Can optionally overlay a kernel density plot of posterior draws of alpha.
 #'
 #' @param params a list of parameters as defined by [geoParams()].
-#' @param mcmc stored output obtained by running [geoMCMC()]. Leave as `NULL` to plot prior only.
-#' @param plotMax maximum x-axis range to plot. Leave as `NULL` to use default settings.
+#' @param mcmc stored output obtained by running [geoMCMC()]. Leave as `NULL`
+#'   to plot prior only.
+#' @param xlim numeric vector of length 2 giving the x-axis range (must be
+#'   non-negative). Leave as `NULL` to use default settings.
+#' @param ylim numeric vector of length 2 giving the y-axis range. Leave as
+#'   `NULL` to use default settings. If the prior diverges at 0
+#'   (`alpha_shape < 1`) the default ignores the leftmost 5\% of the x-range
+#'   when setting the height, so the prior will run off the top of the plot.
 #'
 #' @returns Nothing (called for plotting)
-#'
 #' @export
-#'
 #' @concept plotting
 #'
 #' @examplesIf interactive()
@@ -195,124 +218,79 @@ geoPlotSigma <- function(params, mcmc=NULL, plotMax=NULL) {
 #' d <- geoData(sim$longitude, sim$latitude)
 #' p <- geoParams(data = d, sigma_mean = 1.0, sigma_squared_shape = 2)
 #' m <- geoMCMC(data = d, params = p)
-#' geoPlotAlpha(params = p, mcmc = m)
+#' geoPlotAlpha(params = p, mcmc = m, xlim = c(0,10), ylim = c(0,10))
+#'
 
-
-geoPlotAlpha <- function(params, mcmc=NULL, plotMax=NULL) {
+geoPlotAlpha <- function(params, mcmc = NULL, xlim = NULL, ylim = NULL) {
+#JM: It might be more useful if we could plot an approximation of the number of sources a particular alpha distrib implies.
 
   # check params
-  geoParamsCheck(params, silent=TRUE)
+  geoParamsCheck(params, silent = TRUE)
 
-  # check that plotMax is sensible
-  if (!is.null(plotMax)) {
-    cli_stopifnot(is.numeric(plotMax), "plotMax is not numeric!")
-    cli_stopifnot(is.finite(plotMax), "plotMax is not finite!")
-    cli_stopifnot(plotMax > 0, "plotMax is not a positive number!")
+  # check xlim and ylim
+  if (!is.null(xlim)) {
+    cli_stopifnot(is.numeric(xlim) && length(xlim) == 2, "xlim must be a numeric vector of length 2")
+    cli_stopifnot(all(is.finite(xlim)), "xlim must be finite")
+    cli_stopifnot(xlim[1] >= 0, "xlim[1] must be >= 0 (alpha is positive)")
+    cli_stopifnot(xlim[2] > xlim[1], "xlim[2] must be greater than xlim[1]")
+  }
+  if (!is.null(ylim)) {
+    cli_stopifnot(is.numeric(ylim) && length(ylim) == 2, "ylim must be a numeric vector of length 2")
+    cli_stopifnot(all(is.finite(ylim)), "ylim must be finite")
+    cli_stopifnot(ylim[2] > ylim[1], "ylim[2] must be greater than ylim[1]")
   }
 
-  # extract alpha parameters
+  # extract alpha prior parameters
   alpha_shape <- params$model$alpha_shape
   alpha_rate <- params$model$alpha_rate
+  cli_stopifnot(!is.null(alpha_shape) && !is.null(alpha_rate),
+                "alpha_shape / alpha_rate not found in params$model")
 
   # extract alpha draws from mcmc object
-  alpha_draws <- NULL
+  alpha_draws <- if (!is.null(mcmc)) mcmc$alpha else NULL
 
-  if (!is.null(mcmc)) {
-    alpha_draws <- mcmc$alpha
-  }
-
-  # default plotMax based on extent of prior distribution
-  # AND the extent of posterior draws if available
-  if (is.null(plotMax)) {
-
-    # Use the 99.9th percentile of the prior as the default
-    # upper plotting limit
-    plotMax <- stats::qgamma(
-      0.999,
-      shape = alpha_shape,
-      rate = alpha_rate
-    )
-
-    # Ensure posterior draws are also visible if available
+  # default xlim: 99.9th percentile of prior, extended to cover posterior draws
+  if (is.null(xlim)) {
+    x_max <- stats::qgamma(0.999, shape = alpha_shape, rate = alpha_rate)
     if (!is.null(alpha_draws)) {
-      plotMax <- max(
-        plotMax,
-        2 * max(alpha_draws, na.rm = TRUE)
-      )
+      x_max <- max(x_max, 2 * max(alpha_draws, na.rm = TRUE))
     }
+    xlim <- c(0, x_max)
   }
 
-  # produce prior distribution
-  alpha_vec <- seq(0, plotMax, l = 501)
+  # prior density over the x range
+  alpha_vec <- seq(xlim[1], xlim[2], l = 501)
+  alpha_prior <- stats::dgamma(alpha_vec, shape = alpha_shape, rate = alpha_rate)
 
-  alpha_prior <- stats::dgamma(
-    alpha_vec,
-    shape = alpha_shape,
-    rate = alpha_rate
-  )
+  # posterior density (if draws available)
+  alpha_posterior <- NULL
+  if (!is.null(alpha_draws)) {
+    alpha_posterior <- stats::density(alpha_draws, from = xlim[1], to = xlim[2])
+  }
 
-  # plot prior and overlay density of posterior draws if used
-  if (is.null(alpha_draws)) {
+  # default ylim: finite values only, ignoring the divergence near 0 when shape < 1
+  if (is.null(ylim)) {
+    prior_for_ylim <- alpha_prior
+    if (alpha_shape < 1) {
+      prior_for_ylim <- alpha_prior[alpha_vec > xlim[1] + 0.05 * diff(xlim)]
+    }
+    v <- c(prior_for_ylim, alpha_posterior$y)
+    v <- v[is.finite(v)]
+    ylim <- c(0, 1.1 * max(v))
+  }
 
-    y_max <- 1.1 * max(
-      alpha_prior,
-      na.rm = TRUE
-    )
+  # plot
+  plot(alpha_vec, alpha_prior, type = 'l', lty = 1, xlim = xlim, ylim = ylim,
+       xlab = 'alpha', ylab = 'probability density', main = '')
 
-    plot(
-      alpha_vec,
-      alpha_prior,
-      type = 'l',
-      lty = 1,
-      ylim = c(0, y_max),
-      xlab = 'alpha',
-      ylab = 'probability density',
-      main = ''
-    )
-
-    graphics::legend(
-      x = 'topright',
-      legend = 'prior',
-      lty = 1
-    )
-
+  if (is.null(alpha_posterior)) {
+    graphics::legend(x = 'topright', legend = 'prior', lty = 1)
   } else {
-
-    alpha_posterior <- stats::density(
-      alpha_draws,
-      from = 0,
-      to = plotMax
-    )
-
-    y_max <- 1.1 * max(
-      alpha_prior,
-      alpha_posterior$y,
-      na.rm = TRUE
-    )
-
-    plot(
-      alpha_vec,
-      alpha_prior,
-      type = 'l',
-      lty = 1,
-      ylim = c(0, y_max),
-      xlab = 'alpha',
-      ylab = 'probability density',
-      main = ''
-    )
-
-    graphics::lines(
-      alpha_posterior,
-      lty = 2
-    )
-
-    graphics::legend(
-      x = 'topright',
-      legend = c('prior', 'posterior'),
-      lty = c(1, 2)
-    )
+    graphics::lines(alpha_posterior, lty = 2)
+    graphics::legend(x = 'topright', legend = c('prior', 'posterior'), lty = c(1, 2))
   }
 }
+
 
 #------------------------------------------------
 #' Plot posterior allocation
